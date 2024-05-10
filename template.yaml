@@ -41,7 +41,7 @@ Resources:
         JwtIssuer: !Ref JwtIssuer
         JwtAudience: !Ref JwtAudience
 
-  ProfilesApi:
+  ProfileApi:
     Type: AWS::Serverless::Application
     Properties:
       Location: profiles/template.yaml

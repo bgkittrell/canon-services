@@ -1,6 +1,5 @@
 template-file-path: template.yaml
 parameters:
-  Env: dev
   BaseDomain: canonical.media
   HostedZoneId: Z10468411MV7FJL2T1HZU
   JwtIssuer: https://canonical.us.auth0.com/

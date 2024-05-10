@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  bookboost-lambdas-sam/audiobooks
+Transform:
+  - AWS::Serverless-2016-10-31
+Parameters:
+  FQDN:
+    Type: String
+  ZoneId:
+    Type: String
+  JwtIssuer:
+    Type: String
+  JwtAudience:
+    Type: String
+
+Globals:
+  Function:
+    Timeout: 100
+    Runtime: nodejs20.x
+    CodeUri: .
+    Environment:
+      Variables:
+        AUTH0_CLIENT_ID: '{{resolve:ssm:Prod.AUTH0_CLIENT_ID}}'
+        AUTH0_CLIENT_SECRET: '{{resolve:ssm:Prod.AUTH0_CLIENT_SECRET}}'
+        AUTH0_DOMAIN: '{{resolve:ssm:Prod.AUTH0_DOMAIN}}'
+        NODE_OPTIONS: '--enable-source-maps'
+
+Resources:
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref FQDN
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref FQDN
+          HostedZoneId: !Ref ZoneId
+  CoreApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Auth:
+        Authorizers:
+          Auth0:
+            IdentitySource: '$request.header.Authorization'
+            JwtConfiguration:
+              issuer: !Ref JwtIssuer
+              audience:
+                - !Ref JwtAudience
+
+      StageName: prod
+      Domain:
+        DomainName: !Ref FQDN
+        CertificateArn: !Ref Certificate
+        Route53:
+          HostedZoneId: !Ref ZoneId
+      CorsConfiguration:
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+        AllowOrigins:
+          - '*'
+        AllowHeaders:
+          - '*'
+  GetUsersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: api.getAll
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Auth:
+              Authorizer: Auth0
+              AuthorizationScopes:
+                - 'manage:users'
+            Path: /users
+            Method: GET
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - api.ts
+  GetUserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: api.get
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Auth:
+              Authorizer: Auth0
+            Path: /users/{id}
+            Method: GET
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - api.ts

@@ -1,0 +1,396 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  bookboost-lambdas-sam/files
+Transform:
+  - AWS::Serverless-2016-10-31
+
+Parameters:
+  SnsTopic:
+    Type: String
+  FQDN:
+    Type: String
+  AssetsFQDN:
+    Type: String
+  ZoneId:
+    Type: String
+  JwtIssuer:
+    Type: String
+  JwtAudience:
+    Type: String
+  FilesBucketName:
+    Type: String
+
+Globals:
+  Function:
+    Timeout: 100
+    Runtime: nodejs20.x
+    CodeUri: .
+    Environment:
+      Variables:
+        FILES_TABLE: !Ref FilesTable
+        SNS_TOPIC: !Ref SnsTopic
+        BUCKET_NAME: !Ref AssetsBucket
+        NODE_OPTIONS: '--enable-source-maps'
+
+Resources:
+  # Certivicate for the API Gateway
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref FQDN
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref FQDN
+          HostedZoneId: !Ref ZoneId
+  # API Gateway
+  CoreApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Auth:
+        DefaultAuthorizer: Auth0
+        Authorizers:
+          Auth0:
+            IdentitySource: '$request.header.Authorization'
+            JwtConfiguration:
+              issuer: !Ref JwtIssuer
+              audience:
+                - !Ref JwtAudience
+      StageName: prod
+      Domain:
+        DomainName: !Ref FQDN
+        CertificateArn: !Ref Certificate
+        Route53:
+          HostedZoneId: !Ref ZoneId
+      CorsConfiguration:
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+        AllowOrigins:
+          - '*'
+        AllowHeaders:
+          - '*'
+  # S3 Bucket for files
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref FilesBucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: ObjectWriter
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - DELETE
+            AllowedOrigins:
+              - '*'
+  AssetsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AssetsBucket
+      PolicyDocument:
+        Id: PublicReadPolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub arn:aws:s3:::${AssetsBucket}/*
+  # Cloudfront distribution for assets, primary purpose is to setup a custom domain
+  AssetCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref AssetsFQDN
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref AssetsFQDN
+          HostedZoneId: !Ref ZoneId
+  AssetsDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref ZoneId
+      Name: !Ref AssetsFQDN
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt AssetsDistribution.DomainName
+        HostedZoneId: 'Z2FDTNDATAQYW2' # CloudFront Hosted Zone ID
+  AssetsDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: 'Proxy for AssetsBucket'
+        Enabled: true
+        Aliases:
+          - !Ref AssetsFQDN
+        Origins:
+          - DomainName: !GetAtt [AssetsBucket, DomainName]
+            Id: 'AssetsS3Origin'
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: 'AssetsS3Origin'
+          ViewerProtocolPolicy: 'redirect-to-https'
+          ForwardedValues:
+            QueryString: false
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AssetCertificate
+          SslSupportMethod: 'sni-only'
+
+  # Lambda API functions
+  uploadRequestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref AssetsBucket
+      Handler: presigned.getUploadURL
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Path: /files/upload
+            Method: PUT
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - presigned.ts
+
+  getAllFilesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FilesTable
+      Handler: api.getAll
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Path: /files
+            Method: GET
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - api.ts
+
+  getFileByIdFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.get
+      Policies:
+        # Give Create/Read/Update/Delete Permissions to the SampleTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FilesTable
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Path: /files/{id}
+            Method: GET
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - api.ts
+
+  createFileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: api.create
+      Policies:
+        - Statement:
+            - Sid: SNSPublishMessagePolicy
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref SnsTopic
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FilesTable
+        - S3CrudPolicy:
+            BucketName: !Ref AssetsBucket
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Path: /files
+            Method: POST
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - api.ts
+
+  updateFileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: api.update
+      Policies:
+        - Statement:
+            - Sid: SNSPublishMessagePolicy
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref SnsTopic
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FilesTable
+        - S3CrudPolicy:
+            BucketName: !Ref AssetsBucket
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Path: /files/{id}
+            Method: PUT
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - api.ts
+
+  deleteFileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: api.destroy
+      Policies:
+        - Statement:
+            - Sid: SNSPublishMessagePolicy
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref SnsTopic
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FilesTable
+        - S3CrudPolicy:
+            BucketName: !Ref AssetsBucket
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Path: /files/{id}
+            Method: DELETE
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - api.ts
+
+  # DynamoDB Table for files
+  FilesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: Id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: Id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  # Queue for handling async file processing
+  FileConsumerQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 100
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FileConsumerDLQueue.Arn
+        maxReceiveCount: 10
+  FileConsumerDLQueue:
+    Type: AWS::SQS::Queue
+  FileConsumerQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - sqs:*
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Resource: !GetAtt FileConsumerQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref SnsTopic
+      Queues:
+        - !Ref FileConsumerQueue
+  FileConsumeSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      TopicArn: !Ref SnsTopic
+      Endpoint: !GetAtt FileConsumerQueue.Arn
+
+  # Lambda function to handle async file processing
+  handleQueueFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: consumer.handler
+      Events:
+        SQSEventSource:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt FileConsumerQueue.Arn
+            BatchSize: 10
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref FilesTable
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - consumer.ts
+Outputs:
+  FilesTableName:
+    Description: Files Table Name
+    Value: !Ref FilesTable
+  FilesBucket:
+    Description: Files Bucket Name
+    Value: !Ref AssetsBucket
+  ApiUrl:
+    Description: API Gateway endpoint URL for Prod stage
+    Value: !Sub 'https://${FQDN}'

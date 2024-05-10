@@ -1,0 +1,478 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform:
+  - AWS::Serverless-2016-10-31
+
+Parameters:
+  SnsTopic:
+    Type: String
+  FQDN:
+    Type: String
+  ZoneId:
+    Type: String
+  JwtIssuer:
+    Type: String
+  JwtAudience:
+    Type: String
+
+Globals:
+  Function:
+    Timeout: 100
+    Runtime: nodejs20.x
+    CodeUri: .
+    Environment:
+      Variables:
+        FEEDS_TABLE: !Ref FeedsTable
+        EPISODES_TABLE: !Ref EpisodesTable
+        TRANSCRIPT_BUCKET: !Ref TranscriptBucket
+        SNS_TOPIC: !Ref SnsTopic
+        NODE_OPTIONS: '--enable-source-maps'
+
+Resources:
+  # Certivicate for the API Gateway
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref FQDN
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref FQDN
+          HostedZoneId: !Ref ZoneId
+  # API Gateway
+  CoreApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Auth:
+        DefaultAuthorizer: Auth0
+        Authorizers:
+          Auth0:
+            IdentitySource: '$request.header.Authorization'
+            JwtConfiguration:
+              issuer: !Ref JwtIssuer
+              audience:
+                - !Ref JwtAudience
+      StageName: prod
+      Domain:
+        DomainName: !Ref FQDN
+        CertificateArn: !Ref Certificate
+        Route53:
+          HostedZoneId: !Ref ZoneId
+      CorsConfiguration:
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+        AllowOrigins:
+          - '*'
+        AllowHeaders:
+          - '*'
+
+  GetAllFeedsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FeedsTable
+      Handler: feeds/api.getAll
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Path: /feeds
+            Method: GET
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - feeds/api.ts
+
+  CreateFeedFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: feeds/api.create
+      Policies:
+        - Statement:
+            - Sid: SNSPublishMessagePolicy
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref SnsTopic
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FeedsTable
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Path: /feeds
+            Method: POST
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - feeds/api.ts
+
+  UpdateFeedFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: feeds/api.update
+      Policies:
+        - Statement:
+            - Sid: SNSPublishMessagePolicy
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref SnsTopic
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FeedsTable
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Path: /feeds/{id}
+            Method: PUT
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - feeds/api.ts
+
+  DeleteFeedFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: feeds/api.destroy
+      Policies:
+        - Statement:
+            - Sid: SNSPublishMessagePolicy
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref SnsTopic
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FeedsTable
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Path: /feeds/{id}
+            Method: DELETE
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - feeds/api.ts
+
+  # DynamoDB Table for files
+  FeedsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: Id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: Id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  # Queue for handling async file processing
+  EpisodeConsumerQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 100
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt EpisodeConsumerDLQueue.Arn
+        maxReceiveCount: 10
+  EpisodeConsumerDLQueue:
+    Type: AWS::SQS::Queue
+  EpisodeConsumerQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - sqs:*
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Resource: !GetAtt EpisodeConsumerQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref SnsTopic
+      Queues:
+        - !Ref EpisodeConsumerQueue
+  EpisodeConsumerSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      TopicArn: !Ref SnsTopic
+      Endpoint: !GetAtt EpisodeConsumerQueue.Arn
+
+  # Lambda function to handle async file processing
+  EpisodeConsumerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: episodes/consumer.handler
+      Events:
+        SQSEventSource:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt EpisodeConsumerQueue.Arn
+            BatchSize: 10
+      Policies:
+        - Statement:
+            - Sid: SNSPublishMessagePolicy
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref SnsTopic
+        - DynamoDBWritePolicy:
+            TableName: !Ref EpisodesTable
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - episodes/consumer.ts
+
+  GetAllEpisodesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EpisodesTable
+      Handler: episodes/api.getAll
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Path: /feeds/{feedId}/episodes
+            Method: GET
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - episodes/api.ts
+
+  CreateEpisodeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: episodes/api.create
+      Policies:
+        - Statement:
+            - Sid: SNSPublishMessagePolicy
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref SnsTopic
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EpisodesTable
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Path: /feeds/{feedId}/episodes
+            Method: POST
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - episodes/api.ts
+
+  UpdateEpisodeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: episodes/api.update
+      Policies:
+        - Statement:
+            - Sid: SNSPublishMessagePolicy
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref SnsTopic
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EpisodesTable
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Path: /feeds/{feedId}/episodes/{id}
+            Method: PUT
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - episodes/api.ts
+
+  DeleteEpisodeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: episodes/api.destroy
+      Policies:
+        - Statement:
+            - Sid: SNSPublishMessagePolicy
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref SnsTopic
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EpisodesTable
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Path: /feeds/{feedId}/episodes/{id}
+            Method: DELETE
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - episodes/api.ts
+
+  # DynamoDB Table for files
+  EpisodesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: Id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: Id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  GetNeedsTranscriptionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EpisodesTable
+      Handler: episodes/transcribe-api.getNeedsTranscription
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            Auth:
+              Authorizer: NONE
+            ApiId: !Ref CoreApi
+            Path: /episodes/needs-transcription
+            Method: GET
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - episodes/transcribe-api.ts
+
+  UpdateTranscriptionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Policies:
+        - Statement:
+            - Sid: SNSPublishMessagePolicy
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref SnsTopic
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EpisodesTable
+        - S3WritePolicy:
+            BucketName: !Ref TranscriptBucket
+      Handler: episodes/transcribe-api.update
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            Auth:
+              Authorizer: NONE
+            ApiId: !Ref CoreApi
+            Path: /episodes/{id}
+            Method: PUT
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - episodes/transcribe-api.ts
+  TranscriptBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: ObjectWriter
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - DELETE
+            AllowedOrigins:
+              - '*'
+  TranscriptBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TranscriptBucket
+      PolicyDocument:
+        Id: PublicReadPolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub arn:aws:s3:::${TranscriptBucket}/*
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL for Prod stage
+    Value: !Sub 'https://${FQDN}'

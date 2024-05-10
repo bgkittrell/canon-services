@@ -1,0 +1,110 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Bookbooks Services
+Transform:
+  - AWS::Serverless-2016-10-31
+
+Globals:
+  Function:
+    Tracing: Active
+  Api:
+    TracingEnabled: true
+
+Parameters:
+  BaseDomain:
+    Type: String
+  HostedZoneId:
+    Type: String
+  JwtIssuer:
+    Type: String
+  JwtAudience:
+    Type: String
+  FilesBucketName:
+    Type: String
+
+# Resources declares the AWS resources that you want to include in the stack
+# https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/resources-section-structure.html
+Resources:
+  # Serverless IDE: ignore
+  MessagesTopic:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: template-sns.yaml
+
+  PodcastApi:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: podcasts/template.yaml
+      Parameters:
+        SnsTopic: !GetAtt MessagesTopic.Outputs.MessagesTopicArn
+        FQDN: !Sub podcasts.api.${BaseDomain}
+        ZoneId: !Ref HostedZoneId
+        JwtIssuer: !Ref JwtIssuer
+        JwtAudience: !Ref JwtAudience
+
+  ProfileApi:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: profiles/template.yaml
+      Parameters:
+        SnsTopic: !GetAtt MessagesTopic.Outputs.MessagesTopicArn
+        FQDN: !Sub profiles.api.${BaseDomain}
+        ZoneId: !Ref HostedZoneId
+        JwtIssuer: !Ref JwtIssuer
+        JwtAudience: !Ref JwtAudience
+
+  FilesApi:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: files/template.yaml
+      Parameters:
+        SnsTopic: !GetAtt MessagesTopic.Outputs.MessagesTopicArn
+        AssetsFQDN: !Sub assets.${BaseDomain}
+        FQDN: !Sub files.api.${BaseDomain}
+        ZoneId: !Ref HostedZoneId
+        JwtIssuer: !Ref JwtIssuer
+        JwtAudience: !Ref JwtAudience
+        FilesBucketName: !Ref FilesBucketName
+
+  AdministratorApi:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: admin/template.yaml
+      Parameters:
+        FQDN: !Sub admin.api.${BaseDomain}
+        ZoneId: !Ref HostedZoneId
+        JwtIssuer: !Ref JwtIssuer
+        JwtAudience: !Ref JwtAudience
+
+  StripeApi:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: stripe/template.yaml
+      Parameters:
+        SnsTopic: !GetAtt MessagesTopic.Outputs.MessagesTopicArn
+        FQDN: !Sub billing.api.${BaseDomain}
+        ZoneId: !Ref HostedZoneId
+        JwtIssuer: !Ref JwtIssuer
+        JwtAudience: !Ref JwtAudience
+
+  AssistantApi:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: assistant/template.yaml
+      Parameters:
+        SnsTopic: !GetAtt MessagesTopic.Outputs.MessagesTopicArn
+        FQDN: !Sub assistant.api.${BaseDomain}
+        ZoneId: !Ref HostedZoneId
+        JwtIssuer: !Ref JwtIssuer
+        JwtAudience: !Ref JwtAudience
+
+  ApplicationResourceGroup:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Name: !Sub ApplicationInsights-SAM-${AWS::StackName}
+      ResourceQuery:
+        Type: CLOUDFORMATION_STACK_1_0
+  ApplicationInsightsMonitoring:
+    Type: AWS::ApplicationInsights::Application
+    Properties:
+      ResourceGroupName: !Ref ApplicationResourceGroup
+      AutoConfigurationEnabled: 'true'

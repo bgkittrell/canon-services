@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  bookboost-lambdas-sam/profiles
+Transform:
+  - AWS::Serverless-2016-10-31
+Parameters:
+  SnsTopic:
+    Type: String
+  FQDN:
+    Type: String
+  ZoneId:
+    Type: String
+  JwtIssuer:
+    Type: String
+  JwtAudience:
+    Type: String
+
+Globals:
+  Function:
+    Timeout: 100
+    Runtime: nodejs20.x
+    CodeUri: .
+    Environment:
+      Variables:
+        SNS_TOPIC: !Ref SnsTopic
+        AUTH0_CLIENT_ID: '{{resolve:ssm:Prod.AUTH0_CLIENT_ID}}'
+        AUTH0_CLIENT_SECRET: '{{resolve:ssm:Prod.AUTH0_CLIENT_SECRET}}'
+        AUTH0_DOMAIN: '{{resolve:ssm:Prod.AUTH0_DOMAIN}}'
+        NODE_OPTIONS: '--enable-source-maps'
+Resources:
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref FQDN
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref FQDN
+          HostedZoneId: !Ref ZoneId
+  CoreApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Auth:
+        Authorizers:
+          Auth0:
+            IdentitySource: '$request.header.Authorization'
+            JwtConfiguration:
+              issuer: !Ref JwtIssuer
+              audience:
+                - !Ref JwtAudience
+      StageName: prod
+      Domain:
+        DomainName: !Ref FQDN
+        CertificateArn: !Ref Certificate
+        Route53:
+          HostedZoneId: !Ref ZoneId
+      CorsConfiguration:
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+        AllowOrigins:
+          - '*'
+        AllowHeaders:
+          - '*'
+  getUserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: api.get
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Auth:
+              Authorizer: Auth0
+            Path: /profile
+            Method: GET
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - api.ts
+  updateProfileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: api.update
+      Policies:
+        - Statement:
+            - Sid: SNSPublishMessagePolicy
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref SnsTopic
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Auth:
+              Authorizer: Auth0
+            Path: /profiles
+            Method: PUT
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - api.ts
+  ProfileConsumerQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ProfileConsumerDLQueue.Arn
+        maxReceiveCount: 10
+  ProfileConsumerDLQueue:
+    Type: AWS::SQS::Queue
+  ProfileConsumerQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - sqs:*
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Resource: !GetAtt ProfileConsumerQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref SnsTopic
+      Queues:
+        - !Ref ProfileConsumerQueue
+  ProfileConsumerSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      TopicArn: !Ref SnsTopic
+      Endpoint: !GetAtt ProfileConsumerQueue.Arn
+  handleQueueFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: consumer.handler
+      Events:
+        SQSEventSource:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ProfileConsumerQueue.Arn
+            BatchSize: 10
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - consumer.ts
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL for Prod stage
+    Value: !Sub 'https://${CoreApi}.execute-api.${AWS::Region}.amazonaws.com/prod/'

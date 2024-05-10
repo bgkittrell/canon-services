@@ -1,0 +1,19 @@
+{
+  "name": "files-api",
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.554.0",
+    "@aws-sdk/client-s3": "^3.556.0",
+    "@aws-sdk/client-sns": "^3.563.0",
+    "@aws-sdk/lib-dynamodb": "^3.554.0",
+    "@aws-sdk/s3-presigned-post": "^3.556.0",
+    "@aws-sdk/s3-request-presigner": "^3.556.0",
+    "dotenv": "^16.4.5",
+    "esbuild": "^0.20.2",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "@types/uuid": "^9.0.8"
+  }
+}

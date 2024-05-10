@@ -1,0 +1,10 @@
+{
+  "name": "admin",
+  "type": "module",
+  "dependencies": {
+    "auth0": "^4.3.1",
+    "dotenv": "^16.4.5",
+    "esbuild": "^0.20.2",
+    "jsonwebtoken": "^9.0.2"
+  }
+}

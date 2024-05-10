@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  bookboost-lambdas-sam/open-ai-consumer
+Transform:
+  - AWS::Serverless-2016-10-31
+Parameters:
+  SnsTopic:
+    Type: String
+  FQDN:
+    Type: String
+  ZoneId:
+    Type: String
+  JwtIssuer:
+    Type: String
+  JwtAudience:
+    Type: String
+Globals:
+  Function:
+    Timeout: 120
+    MemorySize: 512
+    Runtime: nodejs20.x
+    CodeUri: .
+    Environment:
+      Variables:
+        LOCKS_TABLE: !Ref LocksTable
+        ASSISTANTS_TABLE: !Ref AssistantsTable
+        CHAT_SESSIONS_TABLE: !Ref ChatSessionsTable
+        SNS_TOPIC: !Ref SnsTopic
+        OPENAI_API_KEY: '{{resolve:ssm:Prod.OPENAI_API_KEY}}'
+        NODE_OPTIONS: '--enable-source-maps'
+Resources:
+  OpenAiQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OpenAiDLQueue.Arn
+        maxReceiveCount: 10
+  OpenAiDLQueue:
+    Type: AWS::SQS::Queue
+  OpenAiQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: OpenAiQueueToSNS
+            Action: SQS:*
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Resource: !GetAtt OpenAiQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref SnsTopic
+      Queues:
+        - !Ref OpenAiQueue
+  OpenAiSnsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      TopicArn: !Ref SnsTopic
+      Endpoint: !GetAtt OpenAiQueue.Arn
+  HandleQueueFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: consumer.handler
+      Events:
+        SQSEventSource:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OpenAiQueue.Arn
+            BatchSize: 10
+      Policies:
+        - Statement:
+            - Sid: SNSPublishMessagePolicy
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref SnsTopic
+        - DynamoDBWritePolicy:
+            TableName: !Ref LocksTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AssistantsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ChatSessionsTable
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - consumer.ts
+
+  StreamFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AssistantsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ChatSessionsTable
+      Handler: stream.handler
+
+  StreamFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !Ref StreamFunction
+      InvokeMode: RESPONSE_STREAM
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowMethods:
+          - POST
+        AllowHeaders:
+          - '*'
+        AllowOrigins:
+          - '*'
+  PublicFunctionUrlPolicy:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunctionUrl
+      FunctionName: !Ref StreamFunction
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+  # Certivicate for the API Gateway
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref FQDN
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref FQDN
+          HostedZoneId: !Ref ZoneId
+  # API Gateway
+  CoreApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Auth:
+        Authorizers:
+          Auth0:
+            IdentitySource: '$request.header.Authorization'
+            JwtConfiguration:
+              issuer: !Ref JwtIssuer
+              audience:
+                - !Ref JwtAudience
+      StageName: prod
+      Domain:
+        DomainName: !Ref FQDN
+        CertificateArn: !Ref Certificate
+        Route53:
+          HostedZoneId: !Ref ZoneId
+      CorsConfiguration:
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+        AllowOrigins:
+          - '*'
+        AllowHeaders:
+          - '*'
+  # Lambda API functions
+  CreateChatSession:
+    Type: AWS::Serverless::Function
+    Properties:
+      Environment:
+        Variables:
+          STREAM_URL: !GetAtt StreamFunctionUrl.FunctionUrl
+      Handler: api.createSession
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AssistantsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ChatSessionsTable
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CoreApi
+            Auth:
+              Authorizer: Auth0
+            Path: /sessions
+            Method: POST
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - api.ts
+  AssistantsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: Id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: Id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  ChatSessionsTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: Id
+        Type: String
+      ProvisionedThroughput:
+        ReadCapacityUnits: 2
+        WriteCapacityUnits: 2
+
+  LocksTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: Id
+        Type: String
+      ProvisionedThroughput:
+        ReadCapacityUnits: 2
+        WriteCapacityUnits: 2

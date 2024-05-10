@@ -1,0 +1,15 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform:
+  - AWS::Serverless-2016-10-31
+
+# Resources declares the AWS resources that you want to include in the stack
+# https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/resources-section-structure.html
+Resources:
+  MessagesTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: MessagesTopic
+
+Outputs:
+  MessagesTopicArn:
+    Value: !Ref MessagesTopic

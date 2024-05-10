@@ -33,7 +33,7 @@ Resources:
   PodcastApi:
     Type: AWS::Serverless::Application
     Properties:
-      Location: podcasts/template.yaml
+      Location: ./podcasts/template.yaml
       Parameters:
         SnsTopic: !GetAtt MessagesTopic.Outputs.MessagesTopicArn
         FQDN: !Sub podcasts.api.${BaseDomain}
@@ -44,7 +44,7 @@ Resources:
   ProfileApi:
     Type: AWS::Serverless::Application
     Properties:
-      Location: profiles/template.yaml
+      Location: ./profiles/template.yaml
       Parameters:
         SnsTopic: !GetAtt MessagesTopic.Outputs.MessagesTopicArn
         FQDN: !Sub profiles.api.${BaseDomain}
@@ -55,7 +55,7 @@ Resources:
   FilesApi:
     Type: AWS::Serverless::Application
     Properties:
-      Location: files/template.yaml
+      Location: ./files/template.yaml
       Parameters:
         SnsTopic: !GetAtt MessagesTopic.Outputs.MessagesTopicArn
         AssetsFQDN: !Sub assets.${BaseDomain}
@@ -68,7 +68,7 @@ Resources:
   AdministratorApi:
     Type: AWS::Serverless::Application
     Properties:
-      Location: admin/template.yaml
+      Location: ./admin/template.yaml
       Parameters:
         FQDN: !Sub admin.api.${BaseDomain}
         ZoneId: !Ref HostedZoneId
@@ -78,7 +78,7 @@ Resources:
   StripeApi:
     Type: AWS::Serverless::Application
     Properties:
-      Location: stripe/template.yaml
+      Location: ./stripe/template.yaml
       Parameters:
         SnsTopic: !GetAtt MessagesTopic.Outputs.MessagesTopicArn
         FQDN: !Sub billing.api.${BaseDomain}
@@ -89,7 +89,7 @@ Resources:
   AssistantApi:
     Type: AWS::Serverless::Application
     Properties:
-      Location: assistant/template.yaml
+      Location: ./assistant/template.yaml
       Parameters:
         SnsTopic: !GetAtt MessagesTopic.Outputs.MessagesTopicArn
         FQDN: !Sub assistant.api.${BaseDomain}

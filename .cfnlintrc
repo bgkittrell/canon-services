@@ -1,3 +1,0 @@
-ignore_checks:
-  # Disable rule I3011
-  - I3011

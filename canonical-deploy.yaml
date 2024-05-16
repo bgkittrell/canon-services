@@ -1,8 +1,0 @@
-template-file-path: template.yaml
-parameters:
-  BaseDomain: canonical.media
-  HostedZoneId: Z10468411MV7FJL2T1HZU
-  JwtIssuer: https://canonical.us.auth0.com/
-  JwtAudience: https://auth.canonical.media/
-  FilesBucketName: canonical-services-files
-tags: {}
